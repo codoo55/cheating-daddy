@@ -617,15 +617,6 @@ export class AssistantView extends LitElement {
         }
     }
 
-    scrollToBottom() {
-        setTimeout(() => {
-            const container = this.shadowRoot.querySelector('.response-container');
-            if (container) {
-                container.scrollTop = container.scrollHeight;
-            }
-        }, 0);
-    }
-
     firstUpdated() {
         super.firstUpdated();
         this.updateResponseContent();
@@ -633,8 +624,26 @@ export class AssistantView extends LitElement {
 
     updated(changedProperties) {
         super.updated(changedProperties);
-        if (changedProperties.has('responses') || changedProperties.has('currentResponseIndex')) {
+
+        const responsesChanged = changedProperties.has('responses');
+        const indexChanged = changedProperties.has('currentResponseIndex');
+
+        if (responsesChanged || indexChanged) {
+            const container = this.shadowRoot.querySelector('#responseContainer');
+            const followingAlong = container ? this._isNearBottom(container) : false;
+
             this.updateResponseContent();
+
+            if (container) {
+                if (indexChanged) {
+                    // Navigation or a fresh response: show the start of the selected response
+                    container.scrollTop = 0;
+                } else if (followingAlong) {
+                    // Streaming update while the user is at the bottom: keep the latest text visible.
+                    // Instant behavior so rapid streamed chunks don't fight the CSS smooth scroll.
+                    container.scrollTo({ top: container.scrollHeight, behavior: 'instant' });
+                }
+            }
         }
 
         if (changedProperties.has('isAnalyzing')) {
@@ -650,6 +659,10 @@ export class AssistantView extends LitElement {
                 this.isAnalyzing = false;
             }
         }
+    }
+
+    _isNearBottom(container) {
+        return container.scrollHeight - container.scrollTop - container.clientHeight < 80;
     }
 
     updateResponseContent() {

@@ -586,6 +586,13 @@ export class CheatingDaddyApp extends LitElement {
         }
     }
 
+    async handleMaximizeToggle() {
+        if (window.require) {
+            const { ipcRenderer } = window.require('electron');
+            await ipcRenderer.invoke('window-maximize');
+        }
+    }
+
     async handleHideToggle() {
         if (window.require) {
             const { ipcRenderer } = window.require('electron');
@@ -980,7 +987,7 @@ export class CheatingDaddyApp extends LitElement {
                     <div class="traffic-lights">
                         <button class="traffic-light close" @click=${() => this.handleClose()} title="Close"></button>
                         <button class="traffic-light minimize" @click=${() => this._handleMinimize()} title="Minimize"></button>
-                        <button class="traffic-light maximize" title="Maximize"></button>
+                        <button class="traffic-light maximize" @click=${() => this.handleMaximizeToggle()} title="Maximize"></button>
                     </div>
                     <div class="drag-region"></div>
                 </div>
