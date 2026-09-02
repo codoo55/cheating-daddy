@@ -29,6 +29,7 @@ let currentProfile = null;
 let currentCustomPrompt = null;
 let isInitializingSession = false;
 let currentSystemPrompt = null;
+let lastSessionError = null;
 
 function formatSpeakerResults(results) {
     let text = '';
@@ -626,6 +627,130 @@ async function sendToGemma(transcription) {
     }
 }
 
+// Optional Live API features (proactivity, diarization, compression, search tools) are
+// only accepted by specific models. Tiers drop features progressively so switching to a
+// different Gemini model degrades gracefully instead of failing to connect.
+const LIVE_FEATURE_TIERS = [
+    { proactivity: true, diarization: true, compression: true, tools: true },
+    { proactivity: false, diarization: true, compression: true, tools: true },
+    { proactivity: false, diarization: false, compression: true, tools: true },
+    { proactivity: false, diarization: false, compression: false, tools: true },
+    { proactivity: false, diarization: false, compression: false, tools: false },
+];
+
+// Setup errors name the unsupported field; map them to the first tier without that feature.
+const LIVE_FEATURE_ERROR_MATCHERS = [
+    { keywords: ['proactiv'], tier: 1 },
+    { keywords: ['diariz', 'speaker'], tier: 2 },
+    { keywords: ['compression', 'sliding'], tier: 3 },
+    { keywords: ['tool', 'search'], tier: 4 },
+];
+
+// Errors that dropping features cannot fix (bad key, unknown model, quota).
+const LIVE_FATAL_ERROR_PATTERN = /api key|permission|quota|not found|no such model|unsupported model|404|403|429/i;
+
+const LIVE_SETUP_TIMEOUT_MS = 15000;
+
+function tierIndexForError(message) {
+    const lower = String(message).toLowerCase();
+    for (const matcher of LIVE_FEATURE_ERROR_MATCHERS) {
+        if (matcher.keywords.some(keyword => lower.includes(keyword))) {
+            return matcher.tier;
+        }
+    }
+    return null;
+}
+
+function buildLiveSessionConfig(tier, { language, systemPrompt, tools }) {
+    const config = {
+        responseModalities: [Modality.AUDIO],
+        outputAudioTranscription: {},
+        inputAudioTranscription: tier.diarization
+            ? {
+                  enableSpeakerDiarization: true,
+                  minSpeakerCount: 2,
+                  maxSpeakerCount: 2,
+              }
+            : {},
+        speechConfig: { languageCode: language },
+        systemInstruction: {
+            parts: [{ text: systemPrompt }],
+        },
+    };
+
+    if (tier.compression) {
+        config.contextWindowCompression = { slidingWindow: {} };
+    }
+    if (tier.proactivity) {
+        config.proactivity = { proactiveAudio: true };
+    }
+    if (tier.tools && tools?.length) {
+        config.tools = tools;
+    }
+
+    return config;
+}
+
+// The SDK resolves live.connect() as soon as the websocket opens, before the server has
+// validated the setup payload. Wait for the setupComplete message so a rejected config
+// surfaces here as an error instead of "connecting" and dropping moments later.
+async function connectLiveSession(client, model, config, callbacks) {
+    let settleSetup;
+    const setupPromise = new Promise((resolve, reject) => {
+        settleSetup = result => (result.error ? reject(result.error) : resolve());
+    });
+    let setupSettled = false;
+
+    const wrappedCallbacks = {
+        onopen: () => callbacks.onopen?.(),
+        onmessage: message => {
+            if (!setupSettled) {
+                setupSettled = true;
+                if (message.setupComplete) {
+                    settleSetup({});
+                } else {
+                    settleSetup({ error: new Error('unexpected first live message') });
+                }
+            }
+            callbacks.onmessage?.(message);
+        },
+        // During setup, close/error are handled by the setup promise (and the tier retry
+        // loop) rather than forwarded: the app's onclose would start a reconnect with the
+        // same rejected config while this function is still negotiating a working one.
+        onerror: e => {
+            if (!setupSettled) {
+                setupSettled = true;
+                settleSetup({ error: new Error(e?.message || 'live websocket error') });
+                return;
+            }
+            callbacks.onerror?.(e);
+        },
+        onclose: e => {
+            if (!setupSettled) {
+                setupSettled = true;
+                settleSetup({ error: new Error(e?.reason || 'live session closed during setup') });
+                return;
+            }
+            callbacks.onclose?.(e);
+        },
+    };
+
+    const session = await client.live.connect({ model, callbacks: wrappedCallbacks, config });
+
+    let timeoutHandle;
+    const timeoutPromise = new Promise((_, reject) => {
+        timeoutHandle = setTimeout(() => reject(new Error('Live session setup timed out')), LIVE_SETUP_TIMEOUT_MS);
+    });
+
+    try {
+        await Promise.race([setupPromise, timeoutPromise]);
+    } finally {
+        clearTimeout(timeoutHandle);
+    }
+
+    return session;
+}
+
 async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'interview', language = 'en-US', isReconnect = false) {
     if (isInitializingSession) {
         console.log('Session initialization already in progress');
@@ -662,102 +787,111 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
     }
 
     try {
-        const session = await client.live.connect({
-            model: getConfig().geminiLiveModel,
-            callbacks: {
-                onopen: function () {
-                    logTransportEvent('gemini.live.opened', {});
-                    sendToRenderer('update-status', 'Live session connected');
-                },
-                onmessage: function (message) {
-                    console.log('----------------', message);
-                    logTransportEvent('gemini.live.message', message);
+        const model = getConfig().geminiLiveModel;
+        const callbacks = {
+            onopen: function () {
+                logTransportEvent('gemini.live.opened', {});
+                sendToRenderer('update-status', 'Live session connected');
+            },
+            onmessage: function (message) {
+                console.log('----------------', message);
+                logTransportEvent('gemini.live.message', message);
 
-                    // Handle input transcription (what was spoken)
-                    if (message.serverContent?.inputTranscription?.results) {
-                        currentTranscription += formatSpeakerResults(message.serverContent.inputTranscription.results);
-                    } else if (message.serverContent?.inputTranscription?.text) {
-                        const text = message.serverContent.inputTranscription.text;
-                        if (text.trim() !== '') {
-                            currentTranscription += text;
+                // Handle input transcription (what was spoken)
+                if (message.serverContent?.inputTranscription?.results) {
+                    currentTranscription += formatSpeakerResults(message.serverContent.inputTranscription.results);
+                } else if (message.serverContent?.inputTranscription?.text) {
+                    const text = message.serverContent.inputTranscription.text;
+                    if (text.trim() !== '') {
+                        currentTranscription += text;
+                    }
+                }
+
+                if (message.serverContent?.inputTranscription) {
+                    sendFinalTranscriptionToGroq();
+                }
+
+                if (!hasGroqKey() && message.serverContent?.outputTranscription?.text) {
+                    const isFirstChunk = messageBuffer === '';
+                    messageBuffer += message.serverContent.outputTranscription.text;
+                    sendToRenderer(isFirstChunk ? 'new-response' : 'update-response', messageBuffer);
+                }
+
+                if (message.serverContent?.generationComplete) {
+                    if (currentTranscription.trim() !== '') {
+                        if (!hasGroqKey() && messageBuffer.trim() !== '') {
+                            saveConversationTurn(currentTranscription, messageBuffer);
                         }
-                    }
-
-                    if (message.serverContent?.inputTranscription) {
-                        sendFinalTranscriptionToGroq();
-                    }
-
-                    if (!hasGroqKey() && message.serverContent?.outputTranscription?.text) {
-                        const isFirstChunk = messageBuffer === '';
-                        messageBuffer += message.serverContent.outputTranscription.text;
-                        sendToRenderer(isFirstChunk ? 'new-response' : 'update-response', messageBuffer);
-                    }
-
-                    if (message.serverContent?.generationComplete) {
-                        if (currentTranscription.trim() !== '') {
-                            if (!hasGroqKey() && messageBuffer.trim() !== '') {
-                                saveConversationTurn(currentTranscription, messageBuffer);
-                            }
-                            currentTranscription = '';
-                        }
-                        messageBuffer = '';
-                    }
-
-                    if (message.serverContent?.turnComplete) {
                         currentTranscription = '';
-                        messageBuffer = '';
-                        groqRequestStartedForTurn = false;
-                        sendToRenderer('update-status', 'Listening...');
                     }
-                },
-                onerror: function (e) {
-                    console.log('Session error:', e.message);
-                    logTransportEvent('gemini.live.error', {
-                        error: e.message,
-                    });
-                    sendToRenderer('update-status', 'Error: ' + e.message);
-                },
-                onclose: function (e) {
-                    console.log('Session closed:', e.reason);
-                    logTransportEvent('gemini.live.closed', {
-                        reason: e.reason,
-                    });
+                    messageBuffer = '';
+                }
 
-                    // Don't reconnect if user intentionally closed
-                    if (isUserClosing) {
-                        isUserClosing = false;
-                        closeTransportLog();
-                        sendToRenderer('update-status', 'Session closed');
-                        return;
-                    }
+                if (message.serverContent?.turnComplete) {
+                    currentTranscription = '';
+                    messageBuffer = '';
+                    groqRequestStartedForTurn = false;
+                    sendToRenderer('update-status', 'Listening...');
+                }
+            },
+            onerror: function (e) {
+                console.log('Session error:', e.message);
+                logTransportEvent('gemini.live.error', {
+                    error: e.message,
+                });
+                sendToRenderer('update-status', 'Error: ' + e.message);
+            },
+            onclose: function (e) {
+                console.log('Session closed:', e.reason);
+                logTransportEvent('gemini.live.closed', {
+                    reason: e.reason,
+                });
 
-                    // Attempt reconnection
-                    if (sessionParams && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-                        attemptReconnect();
-                    } else {
-                        closeTransportLog();
-                        sendToRenderer('update-status', 'Session closed');
-                    }
-                },
+                // Don't reconnect if user intentionally closed
+                if (isUserClosing) {
+                    isUserClosing = false;
+                    closeTransportLog();
+                    sendToRenderer('update-status', 'Session closed');
+                    return;
+                }
+
+                // Attempt reconnection
+                if (sessionParams && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                    attemptReconnect();
+                } else {
+                    closeTransportLog();
+                    sendToRenderer('update-status', 'Session closed');
+                }
             },
-            config: {
-                responseModalities: [Modality.AUDIO],
-                proactivity: { proactiveAudio: true },
-                outputAudioTranscription: {},
-                tools: enabledTools,
-                // Enable speaker diarization
-                inputAudioTranscription: {
-                    enableSpeakerDiarization: true,
-                    minSpeakerCount: 2,
-                    maxSpeakerCount: 2,
-                },
-                contextWindowCompression: { slidingWindow: {} },
-                speechConfig: { languageCode: language },
-                systemInstruction: {
-                    parts: [{ text: systemPrompt }],
-                },
-            },
-        });
+        };
+
+        let session = null;
+        let lastError = null;
+        let tierIndex = 0;
+        while (!session && tierIndex < LIVE_FEATURE_TIERS.length) {
+            const tier = LIVE_FEATURE_TIERS[tierIndex];
+            const config = buildLiveSessionConfig(tier, { language, systemPrompt, tools: enabledTools });
+            try {
+                session = await connectLiveSession(client, model, config, callbacks);
+            } catch (error) {
+                lastError = error;
+                console.error(`Live setup failed for ${model} (config tier ${tierIndex}):`, error.message);
+                logTransportEvent('gemini.live.setup_failed', { model, tier: tierIndex, error: error.message });
+                if (LIVE_FATAL_ERROR_PATTERN.test(error.message)) {
+                    break;
+                }
+                const suggestedTier = tierIndexForError(error.message);
+                tierIndex = suggestedTier !== null ? Math.max(suggestedTier, tierIndex + 1) : tierIndex + 1;
+            }
+        }
+
+        if (!session) {
+            throw lastError || new Error('unable to connect live session');
+        }
+        if (tierIndex > 0) {
+            console.log(`Live session for ${model} connected with reduced config (tier ${tierIndex})`);
+            logTransportEvent('gemini.live.connected', { model, tier: tierIndex });
+        }
 
         isInitializingSession = false;
         if (!isReconnect) {
@@ -766,6 +900,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
         return session;
     } catch (error) {
         console.error('Failed to initialize Gemini session:', error);
+        lastSessionError = error.message;
         isInitializingSession = false;
         if (!isReconnect) {
             sendToRenderer('session-initializing', false);
@@ -1074,12 +1209,13 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
 
     ipcMain.handle('initialize-gemini', async (event, apiKey, customPrompt, profile = 'interview', language = 'en-US') => {
         currentProviderMode = 'byok';
+        lastSessionError = null;
         const session = await initializeGeminiSession(apiKey, customPrompt, profile, language);
         if (session) {
             geminiSessionRef.current = session;
-            return true;
+            return { success: true };
         }
-        return false;
+        return { success: false, error: lastSessionError || 'Could not start the live session' };
     });
 
     ipcMain.handle('initialize-local', async (event, localLlmModel, whisperModel, profile, customPrompt) => {
@@ -1362,4 +1498,8 @@ module.exports = {
     sendImageToGeminiHttp,
     setupGeminiIpcHandlers,
     formatSpeakerResults,
+    LIVE_FEATURE_TIERS,
+    buildLiveSessionConfig,
+    tierIndexForError,
+    connectLiveSession,
 };

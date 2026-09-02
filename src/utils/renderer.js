@@ -144,11 +144,11 @@ async function initializeGemini(profile = 'interview', language = 'en-US') {
     const apiKey = await storage.getApiKey();
     if (apiKey) {
         const prefs = await storage.getPreferences();
-        const success = await ipcRenderer.invoke('initialize-gemini', apiKey, prefs.customPrompt || '', profile, language);
-        if (success) {
+        const result = await ipcRenderer.invoke('initialize-gemini', apiKey, prefs.customPrompt || '', profile, language);
+        if (result && result.success) {
             cheatingDaddy.setStatus('Live');
         } else {
-            cheatingDaddy.setStatus('error');
+            cheatingDaddy.setStatus('Error: ' + (result?.error || 'could not start session'));
         }
     }
 }

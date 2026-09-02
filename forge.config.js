@@ -55,6 +55,20 @@ module.exports = {
                 },
             },
         },
+        {
+            name: '@electron-forge/maker-rpm',
+            platforms: ['linux'],
+            config: {
+                options: {
+                    name: 'cheating-daddy',
+                    productName: 'Cheating Daddy',
+                    genericName: 'AI Assistant',
+                    description: 'AI assistant for interviews and learning',
+                    categories: ['Development', 'Education'],
+                    icon: 'src/assets/logo.png',
+                },
+            },
+        },
     ],
     plugins: [
         {

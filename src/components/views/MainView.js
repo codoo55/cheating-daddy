@@ -13,6 +13,13 @@ const LOCAL_LLM_PRESETS = [
     { value: 'unsloth/Qwen3.5-35B-A3B-GGUF:Q4_K_M', label: 'Qwen 3.5 35B-A3B Q4 — 22.92 GB · Largest' },
 ];
 
+const GEMINI_LIVE_MODEL_PRESETS = [
+    { value: 'gemini-3.1-flash-live-preview', label: 'Gemini 3.1 Flash Live — Latest preview' },
+    { value: 'gemini-live-2.5-flash-native-audio', label: 'Gemini 2.5 Flash Live — Stable' },
+    { value: 'gemini-2.5-flash-native-audio-preview-12-2025', label: 'Gemini 2.5 Flash Native Audio — 12-2025' },
+    { value: 'gemini-2.0-flash-live-001', label: 'Gemini 2.0 Flash Live — Older GA' },
+];
+
 export class MainView extends LitElement {
     static styles = css`
         * {
@@ -699,6 +706,7 @@ export class MainView extends LitElement {
         _groqKey: { state: true },
         _openaiKey: { state: true },
         _geminiLiveModel: { state: true },
+        _useCustomGeminiLiveModel: { state: true },
         _groqModel: { state: true },
         _groqImageModel: { state: true },
         _disableGroqThinking: { state: true },
@@ -728,6 +736,7 @@ export class MainView extends LitElement {
         this._groqKey = '';
         this._openaiKey = '';
         this._geminiLiveModel = 'gemini-3.1-flash-live-preview';
+        this._useCustomGeminiLiveModel = false;
         this._groqModel = 'qwen/qwen3.6-27b';
         this._groqImageModel = 'qwen/qwen3.6-27b';
         this._disableGroqThinking = true;
@@ -768,6 +777,7 @@ export class MainView extends LitElement {
             this._groqKey = (await cheatingDaddy.storage.getGroqApiKey().catch(() => '')) || '';
             this._openaiKey = creds.openaiKey || '';
             this._geminiLiveModel = config.geminiLiveModel || 'gemini-3.1-flash-live-preview';
+            this._useCustomGeminiLiveModel = !GEMINI_LIVE_MODEL_PRESETS.some(preset => preset.value === this._geminiLiveModel);
             this._groqModel = config.groqModel || 'qwen/qwen3.6-27b';
             this._groqImageModel = config.groqImageModel || 'qwen/qwen3.6-27b';
             this._disableGroqThinking = config.disableGroqThinking === true;
@@ -949,6 +959,17 @@ export class MainView extends LitElement {
         this._geminiLiveModel = val;
         await cheatingDaddy.storage.updateConfig('geminiLiveModel', val);
         this.requestUpdate();
+    }
+
+    async _selectGeminiLiveModel(value) {
+        if (value === 'custom') {
+            this._useCustomGeminiLiveModel = true;
+            this.requestUpdate();
+            return;
+        }
+
+        this._useCustomGeminiLiveModel = false;
+        await this._saveGeminiLiveModel(value);
     }
 
     async _saveGroqModel(val) {
@@ -1183,7 +1204,26 @@ export class MainView extends LitElement {
 
                     <div class="form-group">
                         <label class="form-label">Gemini Live Model</label>
-                        <input type="text" .value=${this._geminiLiveModel} @input=${e => this._saveGeminiLiveModel(e.target.value)} />
+                        <select
+                            .value=${this._useCustomGeminiLiveModel ? 'custom' : this._geminiLiveModel}
+                            @change=${event => this._selectGeminiLiveModel(event.target.value)}
+                        >
+                            ${GEMINI_LIVE_MODEL_PRESETS.map(preset => html`<option value=${preset.value}>${preset.label}</option>`)}
+                            <option value="custom">Custom model ID…</option>
+                        </select>
+                        ${
+                            this._useCustomGeminiLiveModel
+                                ? html`
+                                      <input
+                                          type="text"
+                                          placeholder="e.g. gemini-2.5-flash-native-audio-preview-09-2025"
+                                          .value=${this._geminiLiveModel}
+                                          @input=${event => this._saveGeminiLiveModel(event.target.value)}
+                                      />
+                                  `
+                                : ''
+                        }
+                        <div class="form-hint">Features a model doesn't support are dropped automatically at session start.</div>
                     </div>
                 </div>
             </details>

@@ -33,10 +33,18 @@ function createWindow(sendToRenderer, geminiSessionRef) {
     });
 
     const { session, desktopCapturer } = require('electron');
+    // 'loopback' system audio is a Windows-only Electron feature. On Linux the
+    // PipeWire/portal stream carries system audio when the user shares it, and
+    // macOS captures audio separately through SystemAudioDump.
+    const supportsLoopbackAudio = process.platform === 'win32';
     session.defaultSession.setDisplayMediaRequestHandler(
         (request, callback) => {
             desktopCapturer.getSources({ types: ['screen'] }).then(sources => {
-                callback({ video: sources[0], audio: 'loopback' });
+                if (!sources.length) {
+                    callback({});
+                    return;
+                }
+                callback(supportsLoopbackAudio ? { video: sources[0], audio: 'loopback' } : { video: sources[0] });
             });
         },
         { useSystemPicker: true }
