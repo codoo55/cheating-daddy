@@ -49,10 +49,21 @@ export class HistoryView extends LitElement {
                 flex: 1;
             }
 
-            .session-card {
-                width: 100%;
-                border: none;
+            .session-row {
+                display: flex;
+                align-items: center;
+                gap: var(--space-xs);
                 border-bottom: 1px solid var(--border);
+            }
+
+            .session-row:hover .session-card {
+                background: var(--bg-hover);
+            }
+
+            .session-card {
+                flex: 1;
+                min-width: 0;
+                border: none;
                 background: transparent;
                 text-align: left;
                 padding: var(--space-sm) var(--space-md);
@@ -64,8 +75,30 @@ export class HistoryView extends LitElement {
                 gap: var(--space-sm);
             }
 
-            .session-card:hover {
-                background: var(--bg-hover);
+            .session-delete {
+                border: none;
+                background: none;
+                color: var(--text-muted);
+                padding: 6px;
+                margin-right: var(--space-sm);
+                border-radius: var(--radius-sm);
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                flex-shrink: 0;
+                transition:
+                    color var(--transition),
+                    background var(--transition);
+            }
+
+            .session-delete:hover {
+                color: var(--danger);
+                background: rgba(239, 68, 68, 0.1);
+            }
+
+            .session-delete svg {
+                width: 14px;
+                height: 14px;
             }
 
             .session-left {
@@ -311,6 +344,23 @@ export class HistoryView extends LitElement {
         this.activeTab = 'conversation';
     }
 
+    async deleteSession(sessionId) {
+        const session = this.sessions.find(s => s.sessionId === sessionId);
+        const label = session ? this._getProfileLabel(session) : 'this session';
+        if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
+
+        try {
+            await cheatingDaddy.storage.deleteSession(sessionId);
+            if (this.selectedSessionId === sessionId) {
+                this.closeSession();
+            }
+            this.sessions = this.sessions.filter(s => s.sessionId !== sessionId);
+            this.requestUpdate();
+        } catch (error) {
+            console.error('Error deleting session:', error);
+        }
+    }
+
     handleSearchInput(e) {
         this.searchQuery = e.target.value;
     }
@@ -453,13 +503,20 @@ export class HistoryView extends LitElement {
                     ${this.loading ? html`<div class="empty" style="margin:var(--space-md);">Loading sessions...</div>` : ''}
                     ${!this.loading && filteredSessions.length === 0 ? html`<div class="empty" style="margin:var(--space-md);">No matching sessions.</div>` : ''}
                     ${!this.loading ? filteredSessions.map(session => html`
-                        <button class="session-card" @click=${() => this.openSession(session.sessionId)}>
-                            <div class="session-left">
-                                <span class="session-profile">${this._getProfileLabel(session)}</span>
-                                <span class="session-date">${this.formatDate(session.createdAt)} · ${this.formatTime(session.createdAt)}</span>
-                            </div>
-                            ${session.messageCount > 0 ? html`<span class="session-badge">${session.messageCount}</span>` : ''}
-                        </button>
+                        <div class="session-row">
+                            <button class="session-card" @click=${() => this.openSession(session.sessionId)}>
+                                <div class="session-left">
+                                    <span class="session-profile">${this._getProfileLabel(session)}</span>
+                                    <span class="session-date">${this.formatDate(session.createdAt)} · ${this.formatTime(session.createdAt)}</span>
+                                </div>
+                                ${session.messageCount > 0 ? html`<span class="session-badge">${session.messageCount}</span>` : ''}
+                            </button>
+                            <button class="session-delete" title="Delete session" aria-label="Delete session" @click=${() => this.deleteSession(session.sessionId)}>
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.52.149.023a.75.75 0 0 0 .23-1.482 41.03 41.03 0 0 0-2.365-.298V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4Z" clip-rule="evenodd" />
+                                </svg>
+                            </button>
+                        </div>
                     `) : ''}
                 </div>
             </section>
