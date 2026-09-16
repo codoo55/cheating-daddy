@@ -23,7 +23,7 @@ A real-time AI assistant that provides contextual help during video calls, inter
 - **Multiple Profiles**: Interview, Sales Call, Business Meeting, Presentation, Negotiation
 - **Transparent Overlay**: Always-on-top window that can be positioned anywhere
 - **Click-through Mode**: Make window transparent to clicks when needed
-- **Cross-platform**: Works on macOS, Windows, and Linux (kinda, dont use, just for testing rn)
+- **Cross-platform**: Works on macOS, Windows, and Linux (Fedora tested; screen capture and audio go through xdg-desktop-portal/PipeWire on Linux)
 
 ## Setup
 
@@ -50,7 +50,13 @@ A real-time AI assistant that provides contextual help during video calls, inter
 
 - **macOS**: [SystemAudioDump](https://github.com/Mohammed-Yasin-Mulla/Sound) for system audio
 - **Windows**: Loopback audio capture
-- **Linux**: Microphone input
+- **Linux**: System audio through the desktop portal (PipeWire) when your desktop supports it; microphone input otherwise
+
+## Linux notes (Fedora)
+
+- Screen capture and system audio require `xdg-desktop-portal` with your desktop's backend (e.g. `xdg-desktop-portal-gnome` or `xdg-desktop-portal-kde`) and `PipeWire`. Fedora ships these by default on GNOME and KDE.
+- On Wayland a portal picker dialog appears when a session starts — pick the screen you want analyzed. System audio is shared only if your portal offers the audio option.
+- Build Fedora-native packages with `npm run make` (RPM and AppImage; RPM requires `rpm-build`). The Local AI mode (llama.cpp/whisper.cpp) is not yet available on Linux — use a Gemini API key.
 
 ## Requirements
 
